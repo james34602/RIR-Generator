@@ -162,9 +162,11 @@ int main()
 	sf_writef_double(wavOut, sndBuf, nSamples);
 	sf_close(wavOut);
 	free(beta);
-	free(*rr);
+	for (int i = 0; i < nMicrophones; i++)
+		free(rr[i]);
 	free(rr);
-	free(*imp);
+	for (int i = 0; i < nMicrophones; i++)
+		free(imp[i]);
 	free(imp);
 	free(sndBuf);
 	exit(0);
