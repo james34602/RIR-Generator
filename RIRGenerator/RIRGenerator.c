@@ -35,65 +35,20 @@ double microphoneType(double x, double y, double z, double* angle, int mtype)
 	gain = rho + (1 - rho) * gain;
 	return gain;
 }
-double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* ss, double* LL, int betaNum, double* beta, int nSamples, int microphone_type, int nOrder, int nDimension, int orientationEnable, double* orientation, int isHighPassFilter)
+void RIRCleanUp(double** imp, double** rr, int nMicrophones, double* LPI)
 {
-	int j;
-	double reverberation_time = 0;;
-	double angle[2];
-	if (betaNum == 1)
-	{
-		double V = LL[0] * LL[1] * LL[2];
-		double S = 2 * (LL[0] * LL[2] + LL[1] * LL[2] + LL[0] * LL[1]);
-		reverberation_time = beta[0];
-		if (reverberation_time != 0) {
-			double alfa = 24 * V*log(10.0) / (c*S*reverberation_time);
-			if (alfa > 1) {
-				printf("Error: The reflection coefficients cannot be calculated using the current room parameters, i.e. room size and reverberation time.\nPlease specify the reflection coefficients or change the room parameters.");
-				return 0;
-		}
-			for (int i = 0; i < 6; i++)
-				beta[i] = sqrt(1 - alfa);
-		}
-		else
-		{
-			for (int i = 0; i < 6; i++)
-				beta[i] = 0;
-		}
-	}
-	if (orientationEnable == 1)
-	{
-		angle[0] = orientation[0];
-		angle[1] = orientation[1];
-	}
-	else
-	{
-		angle[0] = 0;
-		angle[1] = 0;
-	}
-	if (nDimension == 2)
-	{
-		beta[4] = 0;
-		beta[5] = 0;
-	}
-	else
-	{
-		nDimension = 3;
-	}
-	if (nOrder < -1)
-		nOrder = -1;
-	if (nSamples == 0 && betaNum > 1)
-	{
-		double V = LL[0] * LL[1] * LL[2];
-		double alpha = ((1 - pow(beta[0], 2)) + (1 - pow(beta[1], 2)))*LL[1] * LL[2] +
-			((1 - pow(beta[2], 2)) + (1 - pow(beta[3], 2)))*LL[0] * LL[2] +
-			((1 - pow(beta[4], 2)) + (1 - pow(beta[5], 2)))*LL[0] * LL[1];
-		reverberation_time = 24 * log(10.0)*V / (c*alpha);
-		if (reverberation_time < 0.128)
-			reverberation_time = 0.128;
-		nSamples = (int)(reverberation_time * fs);
-	}
+	int i;
+	for (i = 0; i < nMicrophones; i++)
+		free(imp[i]);
+	free(imp);
+	for (i = 0; i < nMicrophones; i++)
+		free(rr[i]);
+	free(rr);
+	free(LPI);
+}
+void rir_generator(double** imp, double c, int fs, int nMicrophones, double** rr, double* ss, double* LL, int betaNum, double* beta, int timeWidth, double* LPI, int nSamples, int microphone_type, int nOrder, int nDimension, double* angle, int isHighPassFilter)
+{
 	// Create output vector
-	double** imp = gen2DArrayCALLOC(nMicrophones, nSamples);
 	// Temporary variables and constants (high-pass filter)
 	const double W = 2 * M_PI * 100 / fs; // The cut-off frequency equals 100 Hz
 	const double R1 = exp(-W);
@@ -105,9 +60,7 @@ double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* 
 
 	// Temporary variables and constants (image-method)
 	const double Fc = 1; // The cut-off frequency equals fs/2 - Fc is the normalized cut-off frequency.
-	const int    Tw = 2 * ROUND(0.004*fs); // The width of the low-pass FIR equals 8 ms
 	const double cTs = c / fs;
-	double* LPI = (double*)calloc(Tw, sizeof(double));
 	double      r[3];
 	double      s[3];
 	double      L[3];
@@ -118,7 +71,7 @@ double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* 
 	double       gain;
 	int          startPosition;
 	int          n1, n2, n3;
-	int          q, k;
+	int          j, q, k;
 	int          mx, my, mz;
 	int          n;
 
@@ -126,7 +79,6 @@ double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* 
 	L[0] = LL[0] / cTs; L[1] = LL[1] / cTs; L[2] = LL[2] / cTs;
 	for (int idxMicrophone = 0; idxMicrophone < nMicrophones; idxMicrophone++)
 	{
-		printf("\nProcessing microphone %d", idxMicrophone);
 		r[0] = rr[idxMicrophone][0] / cTs;
 		r[1] = rr[idxMicrophone][1] / cTs;
 		r[2] = rr[idxMicrophone][2] / cTs;
@@ -172,11 +124,11 @@ double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* 
 										gain = microphoneType(Rp_plus_Rm[0], Rp_plus_Rm[1], Rp_plus_Rm[2], angle, microphone_type)
 											* refl[0] * refl[1] * refl[2] / (4 * M_PI*dist*cTs);
 
-										for (n = 0; n < Tw; n++)
-											LPI[n] = 0.5 * (1 - cos(2 * M_PI*((n + 1 - (dist - fdist)) / Tw))) * Fc * Sinc(M_PI*Fc*(n + 1 - (dist - fdist) - (Tw / 2)));
+										for (n = 0; n < timeWidth; n++)
+											LPI[n] = 0.5 * (1 - cos(2 * M_PI*((n + 1 - (dist - fdist)) / timeWidth))) * Fc * Sinc(M_PI*Fc*(n + 1 - (dist - fdist) - (timeWidth / 2)));
 
-										startPosition = (int)fdist - (Tw / 2) + 1;
-										for (n = 0; n < Tw; n++)
+										startPosition = (int)fdist - (timeWidth / 2) + 1;
+										for (n = 0; n < timeWidth; n++)
 											if (startPosition + n >= 0 && startPosition + n < nSamples)
 												imp[idxMicrophone][(startPosition + n)] += gain * LPI[n];
 									}
@@ -201,8 +153,6 @@ double** rir_generator(double c, int fs, int nMicrophones, double** rr, double* 
 			}
 		}
 	}
-	free(LPI);
-	return imp;
 }
 double** gen2DArrayCALLOC(int arraySizeX, int arraySizeY) {
 	double** array2D;
@@ -210,9 +160,4 @@ double** gen2DArrayCALLOC(int arraySizeX, int arraySizeY) {
 	for (int i = 0; i < arraySizeX; i++)
 		array2D[i] = (double*)calloc(arraySizeY, sizeof(double));
 	return array2D;
-}
-double* gen1DArrayCALLOC(int arraySize) {
-	double* array1D;
-	array1D = (double*)calloc(arraySize, sizeof(double*));
-	return array1D;
 }

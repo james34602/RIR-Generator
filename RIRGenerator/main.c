@@ -1,6 +1,25 @@
 #include <stdio.h>
 #include "RIRGenerator.h"
-#include "tools.h"
+#define HAVESNDFILE
+#ifdef HAVESNDFILE
+#include "sndfile.h"
+#endif
+void normalise(double* buffer, int num_samps, double maxval)
+{
+	double loudest_sample = 0.0, multiplier = 0.0;
+	int i;
+	for (i = 0; i < num_samps; i++)
+		if (fabs(buffer[i]) > loudest_sample) loudest_sample = buffer[i];
+	multiplier = maxval / loudest_sample;
+	for (i = 0; i < num_samps; i++)
+		buffer[i] *= multiplier;
+}
+void channel_join(double** chan_buffers, int num_channels, double* buffer, int num_frames)
+{
+	int i, samples = num_frames * num_channels;
+	for (i = 0; i < samples; i++)
+		buffer[i] = chan_buffers[i % num_channels][i / num_channels];
+}
 int main()
 {
 	printf("--------------------------------------------------------------------\n"
@@ -35,17 +54,19 @@ int main()
 		"Output parameters:\n"
 		" h           : M x nsample matrix containing the calculated room impulse\n"
 		"               response(s).Output as MicrophoneXXImpulseResponse.csv\n"
+#ifdef HAVESNDFILE
 		"               and MicrophonesXXImpulseResponse.wav\n");
 	SNDFILE* wavOut = NULL;
 	SF_INFO impProp;
+	double *sndBuf;
+	int totalFrames;
+#else
+		);
+#endif
 	int i, j, k;
 	double c;
 	int SampleRate;
 	int nMicrophones;
-	double** imp;
-	double** rr;
-	double* beta;
-	double *sndBuf;
 	double ss[3];
 	double LL[3];
 	int nSamples;
@@ -56,76 +77,116 @@ int main()
 	int orientationEnable;
 	double orientation[2];
 	int isHighPassFilter;
-	int totalFrames;
-	double fillrr;
+	double reverberation_time = 0;
+	// Below should not be changed after initalise
 	printf("Sound velocity:");
 	scanf("%lf", &c);
 	printf("Sample rate:");
 	scanf("%d", &SampleRate);
 	printf("Numbers of microphones:");
 	scanf("%d", &nMicrophones);
-	rr = gen2DArrayCALLOC(nMicrophones, 3);
+	printf("Room size x,y,z:");
+	for (i = 0; i < 3; i++)
+		scanf("%lf", &LL[i]);
+	double beta[6] = { 0,0,0,0,0,0 };
+	printf("Numbers of beta:");
+	scanf("%d", &betaNum);
+	for (i = 0; i < betaNum; i++)
+	{
+		printf("Beta:");
+		scanf("%lf", &beta[i]);
+	}
+	printf("Total samples you want to generate(if numbers of beta > 1, this can be set to zero for auto generation):");
+	scanf("%d", &nSamples);
+	if (!nSamples && betaNum > 1)
+	{
+		double V = LL[0] * LL[1] * LL[2];
+		double alpha = ((1 - pow(beta[0], 2)) + (1 - pow(beta[1], 2)))*LL[1] * LL[2] +
+			((1 - pow(beta[2], 2)) + (1 - pow(beta[3], 2)))*LL[0] * LL[2] +
+			((1 - pow(beta[4], 2)) + (1 - pow(beta[5], 2)))*LL[0] * LL[1];
+		reverberation_time = 24 * log(10.0)*V / (c*alpha);
+		if (reverberation_time < 0.128)
+			reverberation_time = 0.128;
+		nSamples = (int)(reverberation_time * SampleRate);
+	}
+	else if (!nSamples && betaNum <= 1)
+	{
+		printf("Cannot generate zero sample impulse response, at least numbers of beta should larger than 1");
+		return 0;
+	}
+	if (betaNum == 1)
+	{
+		double V = LL[0] * LL[1] * LL[2];
+		double S = 2 * (LL[0] * LL[2] + LL[1] * LL[2] + LL[0] * LL[1]);
+		reverberation_time = beta[0];
+		if (reverberation_time != 0)
+		{
+			double alfa = 24 * V*log(10.0) / (c*S*reverberation_time);
+			if (alfa > 1)
+				printf("Error: The reflection coefficients cannot be calculated using the current room parameters, i.e. room size and reverberation time.\nPlease "
+					"specify the reflection coefficients or change the room parameters.");
+			for (int i = 0; i < 6; i++)
+				beta[i] = sqrt(1 - alfa);
+		}
+		else
+		{
+			for (int i = 0; i < 6; i++)
+				beta[i] = 0;
+		}
+	}
+	double** rr = gen2DArrayCALLOC(nMicrophones, 3);
+	int timeWidth = 2 * ROUND(0.004*SampleRate); // The width of the low-pass FIR equals 8 ms;
+	double* LPI = (double*)calloc(timeWidth, sizeof(double));
+	double** imp = gen2DArrayCALLOC(nMicrophones, nSamples);
+	// Below parameters can change whatever you want
+	printf("Sound source x,y,z:");
+	for (i = 0; i < 3; i++)
+		scanf("%lf", &ss[i]);
 	for (i = 0; i < nMicrophones; i++)
 	{
 		for (j = 0; j < 3; j++)
 		{
-			if(j==0)
+			if (j == 0)
 				printf("Fill in x position of microphone %d: ", i + 1);
 			else if (j == 1)
 				printf("Fill in y position of microphone %d: ", i + 1);
 			else if (j == 2)
 				printf("Fill in z position of microphone %d: ", i + 1);
-			scanf("%lf", &fillrr);
-			rr[i][j] = fillrr;
+			scanf("%lf", &rr[i][j]);
 		}
 	}
-	printf("Source x,y,z:");
-	for (i = 0; i < 3; i++)
-	{
-		scanf("%lf", &fillrr);
-		ss[i] = fillrr;
-	}
-	printf("Room size x,y,z:");
-	for (i = 0; i < 3; i++)
-	{
-		scanf("%lf", &fillrr);
-		LL[i] = fillrr;
-	}
-	printf("Numbers of beta:");
-	scanf("%d", &betaNum);
-	beta = gen1DArrayCALLOC(betaNum);
-	for (i = 0; i < betaNum; i++)
-	{
-		printf("Beta:");
-		scanf("%lf", &fillrr);
-		beta[i] = fillrr;
-	}
-	printf("Total samples you want to generate:");
-	scanf("%d", &nSamples);
 	printf("Microphone types[Bidirectional=0, hypercardioid=1, cardioid=2, subcardioid=3, omnidirectional=4]:");
 	scanf("%d", &microphone_type);
-	printf("Reflection order, -1 is maximum order:");
-	scanf("%d", &nOrder);
 	printf("Room dimensions, 2=2D 3=3D:");
 	scanf("%d", &nDimension);
-	if (nDimension < 2)
-		nDimension = 2;
+	if (nDimension == 2)
+	{
+		beta[4] = 0;
+		beta[5] = 0;
+	}
 	else
 		nDimension = 3;
 	printf("Enable orientations? 0=Disable 1=Enable:");
 	scanf("%d", &orientationEnable);
 	if (orientationEnable == 1)
 	{
-		printf("Orientation:");
-		for (i = 0; i < 2; i++)
-		{
-			scanf("%lf", &fillrr);
-			orientation[i] = fillrr;
-		}
+		printf("Orientation 1:");
+		scanf("%lf", &orientation[0]);
+		printf("Orientation 2:");
+		scanf("%lf", &orientation[1]);
 	}
-	printf("Need high pass filtering of the impulse response? 0=Disable 1=Enable:");
+	else
+	{
+		orientation[0] = 0;
+		orientation[1] = 0;
+	}
+	printf("Reflection order, -1 is maximum order:");
+	scanf("%d", &nOrder);
+	if (nOrder < -1)
+		nOrder = -1;
+	printf("High pass filtering of the impulse response? 0=Disable 1=Enable:");
 	scanf("%d", &isHighPassFilter);
-	imp = rir_generator(c, SampleRate, nMicrophones, rr, ss, LL, betaNum, beta, nSamples, microphone_type, nOrder, nDimension, orientationEnable, orientation, isHighPassFilter);
+	rir_generator(imp, c, SampleRate, nMicrophones, rr, ss, LL, betaNum, beta, timeWidth, LPI, nSamples, microphone_type, nOrder, nDimension, orientation, isHighPassFilter);
 	char dynamicName[256];
 	sprintf(dynamicName, "Microphone%iImpulseResponse.csv", nMicrophones);
 	FILE *impFile = fopen(dynamicName, "w+");
@@ -134,40 +195,36 @@ int main()
 		for (k = 0; k < nMicrophones; k++)
 		{
 			if (k == nMicrophones - 1) {
-				if(imp[k][i] == 0.0)
+				if (imp[k][i] == 0.0)
 					fprintf(impFile, "0");
 				else
-					fprintf(impFile, "%4.65f", imp[k][i]);
+					fprintf(impFile, "%4.18f", imp[k][i]);
 			}
 			else {
 				if (imp[k][i] == 0.0)
 					fprintf(impFile, "0,");
 				else
-					fprintf(impFile, "%4.65f,", imp[k][i]);
+					fprintf(impFile, "%4.18f,", imp[k][i]);
 			}
 		}
 		fprintf(impFile, "\n");
 	}
 	fclose(impFile);
+#ifdef HAVESNDFILE
 	sprintf(dynamicName, "Microphones%iImpulseResponse.wav", nMicrophones);
 	totalFrames = nMicrophones * nSamples;
 	sndBuf = (double*)calloc(totalFrames, sizeof(double));
 	channel_join(imp, nMicrophones, sndBuf, nSamples);
-	normalize(sndBuf, totalFrames, 0.9);
+	normalise(sndBuf, totalFrames, 0.9);
 	impProp.samplerate = SampleRate;
 	impProp.channels = nMicrophones;
-	impProp.frames = totalFrames;
+	impProp.frames = nSamples;
 	impProp.format = SF_FORMAT_WAV | SF_FORMAT_PCM_32;
 	wavOut = sf_open(dynamicName, SFM_WRITE, &impProp);
 	sf_writef_double(wavOut, sndBuf, nSamples);
 	sf_close(wavOut);
-	free(beta);
-	for (int i = 0; i < nMicrophones; i++)
-		free(rr[i]);
-	free(rr);
-	for (int i = 0; i < nMicrophones; i++)
-		free(imp[i]);
-	free(imp);
 	free(sndBuf);
-	exit(0);
+#endif
+	RIRCleanUp(imp, rr, nMicrophones, LPI);
+	return 0;
 }

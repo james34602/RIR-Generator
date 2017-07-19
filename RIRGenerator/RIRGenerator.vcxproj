@@ -154,12 +154,10 @@
   <ItemGroup>
     <ClCompile Include="main.c" />
     <ClCompile Include="RIRGenerator.c" />
-    <ClCompile Include="tools.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="RIRGenerator.h" />
     <ClInclude Include="sndfile.h" />
-    <ClInclude Include="tools.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
